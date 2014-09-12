@@ -1,0 +1,220 @@
+---
+title: "Mistake detection in a weight-lifting exercise using a random forest analysis of data obtained from an on-body sensing system"
+output: html_document
+bibliography: bibliography.bib
+csl: cell.csl
+---
+
+```{r computetime,echo=FALSE}
+time <- format(as.POSIXlt(Sys.time(), "GMT"), "%a %b %d %X %Y")
+version <- R.version.string
+```
+This markdown file was generated on `r time` UTC using `r version`.
+
+## Introduction
+
+This assignment was completed to fulfill, in part, the requirements of the [Johns Hopkins University Practical Machine Learning](https://www.coursera.org/course/predmachlearn) course.  The purpose of this assignment was to demonstrate competency in applying and interpreting basic machine learning algorithms to complex data sets.
+
+To do this, I analyzed the [Weight Lifting Exercises Dataset](http://groupware.les.inf.puc-rio.br/har) developed by [Groupware@LES](http://groupware.les.inf.puc-rio.br/) [@ah13_velloso].  The data was derived, briefly, as follows.  Six young healthy male participants, aged 20-28 years, were asked to perform one set of 10 repetitions of a unilateral dumbbell bicep curl exercise in five different manners: 
+
+* exactly according to the specification (Class A) 
+* throwing the elbows to the front (Class B)
+* lifting the dumbbell only halfway (Class C) 
+* lowering the dumbbell only halfway (Class D) 
+* throwing the hips to the front (Class E)  
+
+Thus, class A corresponded to the specified execution of the exercise, while the other four classes corresponded to common mistakes. An on-body sensing system, consisting of multiple wearable devices, gathered information concerning joint angle, range, and repetition count for the wrist, elbow, and shoulder.
+
+In the current analysis, I attempted to apply machine learning algorithms to data obtained from the on-body sensing system as a means to detect mistakes.  
+
+## Set parameters, load in and preprocess the data
+
+```{r, echo=FALSE}
+```{r globalparameters, results="hide"}
+setwd("C:/Users/Carl/SkyDrive/Documents")
+Sys.setlocale("LC_TIME", "English")
+set.seed(66669)
+suppressPackageStartupMessages(require("Amelia"))
+suppressPackageStartupMessages(require("caret"))
+suppressPackageStartupMessages(require("doParallel"))
+options(scipen = 1, digits = 7)
+cl<-makeCluster(3)
+registerDoParallel(cl)
+fileUrl1 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+fileUrl2 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+if(!file.exists("pml-testing.csv")){
+        download.file(fileUrl1, destfile = "pml-testing.csv", 
+                      method="auto") 
+}
+if(!file.exists("pml-training.csv")){
+        download.file(fileUrl2, destfile = "pml-training.csv", 
+                      method="auto")          
+}
+testing <- read.csv("pml-testing.csv", na.strings = c("NA"," ",""))
+data <- read.csv("pml-training.csv", na.strings = c("NA"," ",""))
+```
+
+First, a brief look at the data set at hand:
+
+```{r, fig.width=7, fig.height=7}
+str(data)
+missmap(data, y.cex = 0.1, x.cex = 0.1, main = "Missingness Map: Data"); missmap(testing, y.cex = 0.1, x.cex = 0.1, main = "Missingness Map: Test")
+```
+
+The data set contained `r dim(data)[1]` observations for `r dim(data)[2]` different variables.  Several columns, however, contained a large number of missing measurements (designated in the tan color in two charts seen above). Furthermore, the first seven columns contain irrelevant data (subject identifiers and timestamps; i.e. data that should not be related to the outcome).  As a result, all columns missing more than 50% of their respective measurements, as well as the first seven columns of irrelevant data, were removed from further analyses:
+
+
+```{r}
+n.test <- nrow(testing)  / 2
+n.data <- nrow(data) / 2
+testing <- testing[,colSums(is.na(testing)) < n.test]
+data <- data[,colSums(is.na(data)) < n.data]
+testing <- testing[ -c(1:7)]
+data <- data[ -c(1:7)]
+```
+
+
+After removing incomplete or irrelevant data, the data set contained `r dim(data)[1]` observations for `r dim(data)[2]` different variables.  I next tested the data set for the presence of predictors with near-zero variance:
+
+
+```{r}
+nearZeroVariables <- nearZeroVar(data[-53], saveMetrics=TRUE)
+nearZeroVariables
+```
+
+
+No near-zero variance predictors were observed.  After data clean up, the following 52 predictors remained:
+
+
+```{r}
+sort(names(data[-53]))
+```
+
+
+Next, the resulting data were partitioned, using random selection, into a training set, consisting of 60% of the original data, and a cross-validation set, consisting of the remaining 40% of the original data:
+
+
+```{r}
+inTrain <- createDataPartition(data$classe, p=0.60, list=FALSE)
+training <- data[inTrain,]
+crossValidation <- data[-inTrain,]
+```
+
+
+## Fitting a random forest model
+
+The `caret` package [@Kuhn:2008:JSSOBK:v28i05] was used to build predictive models in R.  A random forest model [@Breiman:2001:RF:570181.570182] was fitted using default parameters where the dependent variable was the class variable, and all 52 remaining variables were used as predictors.    
+
+
+```{r}
+model_rf <- train(classe~., method = "rf", data=training)
+model_rf
+```
+
+
+The computed **accuracy** to predict the class variable in the training set using random forest with default parameters was **`r round(model_rf$results[2,2],4) * 100`%**.
+
+
+## Cross-validation of the random forest model
+
+We next applied the derived model to the cross-validation data set:
+
+
+```{r}
+predicted_rf <- predict(model_rf , crossValidation)
+confMatPredRF <- confusionMatrix(predicted_rf,crossValidation$classe)
+confMatPredRF$table
+confMatPredRF$overall[1:2]
+```
+
+The computed **accuracy** to predict the class variable in the cross-validation data set was **`r round(confMatPredRF$overall[1],4) * 100`%**.  Thus, the **out of sample error** was **`r (1-round(confMatPredRF$overall[1],4)) * 100`%**  
+
+## Fitting a simplified random forest model
+
+Because of the large number of variables to run the random forest model (and thus the long computational time required to run said model), I sought to identify the most important variables required for construction of the model.  The following figure illustrates the importance of the top 20 most important predictors:
+
+
+```{r, fig.width=7, fig.height=7}
+data.rf.varimp <- varImp(model_rf, scale=FALSE) 
+importancePlot <- dotPlot(data.rf.varimp,main="Variable Importance for Random Forest Model")
+importancePlot 
+```
+
+
+The magnitude of variable importance itself has little empirical value, however, given that there appears to be a clear division between the top seven and the remaining variables, I constructed a random forest model using only the top seven most important variables:
+
+
+```{r}
+model_rf.top7 <- train(classe ~ roll_belt + pitch_forearm + yaw_belt + pitch_belt + magnet_dumbbell_z + magnet_dumbbell_y + roll_forearm, method = "rf", data = training)
+model_rf.top7
+```
+
+
+The computed **accuracy** to predict the class variable in the training set, using a model with only the seven most important variables, was **`r round(model_rf.top7$results[2,2],4) * 100`%**.
+
+## Cross-validation of the simplified random forest model
+
+We next applied the derived simplified model to the cross-validation data set:
+
+```{r}
+predicted_rf.top7 <- predict(model_rf.top7, crossValidation)
+confMatPredRFTop7 <- confusionMatrix(predicted_rf.top7, crossValidation$classe)
+confMatPredRFTop7$table
+confMatPredRFTop7$overall[1:2]
+```
+
+The computed **accuracy** to predict the class variable in the cross-validation data set, using a model with only the seven most important variables,  was **`r round(confMatPredRFTop7$overall[1],4) * 100`%**.  Thus, the **out of sample error** was **`r (1-round(confMatPredRFTop7$overall[1],4)) * 100`%** 
+
+## Prediction of the class of 20 test cases
+
+Next, I applied the two random forest algorithms to the test dataset that contained unknown class designations.
+
+First, the random forest model using all 52 predictors:
+
+```{r}
+testPrediction <- predict(model_rf, testing)
+testPrediction
+```
+
+
+Next, the simplified random forest model using only the top seven most important predictors:
+
+```{r}
+testPredictionTop7 <- predict(model_rf.top7, testing)
+testPredictionTop7
+```
+
+
+Next I asked whether the test set class predictions made from the simplified model were identical to those made by the original model:
+
+
+```{r}
+identical(testPrediction, testPredictionTop7)
+```
+
+
+Predictions resulting from the two models were confirmed to be identical.  I next submitted the test predictions to the Coursera course [Prediction Assignment Submission System](https://class.coursera.org/predmachlearn-005/assignment):
+
+
+```{r}
+answers = as.vector(testPrediction)
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(answers)
+```
+
+
+Both models achieved 100% accuracy at predicting the value of the class variable for the twenty assigned test cases.
+
+## Conclusions
+
+A random forest model, using all 52 predictors derived from an on-body sensing system, can predict defined exercise error class with an accuracy of **`r round(confMatPredRF$overall[1],4) * 100`%**.  A simplified (and thus computationally efficient) random forest model, using only the top seven most important predictors, can predict defined exercise error class with an accuracy of **`r round(confMatPredRFTop7$overall[1],4) * 100`%**
+  
+
+## References
+
